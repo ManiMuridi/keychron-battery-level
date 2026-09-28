@@ -1,0 +1,21 @@
+[package]
+name = "keychron-battery"
+version = "0.1.0"
+edition = "2024"
+description = "A native macOS menu bar battery monitor for Keychron keyboards"
+license = "MIT"
+authors = ["ManiMuridi"]
+repository = "https://github.com/ManiMuridi/keychron-battery-level"
+
+[dependencies]
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
