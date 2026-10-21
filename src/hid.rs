@@ -10,6 +10,26 @@ use core_foundation::{
 use crate::model::{BatteryElement, Device, Snapshot, measured_percent};
 
 type Ref = *const c_void;
+const NOT_PERMITTED: u32 = 0xe000_02e2;
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn IsSecureEventInputEnabled() -> u8;
+}
+
+pub fn secure_input_enabled(_mtm: objc2::MainThreadMarker) -> bool {
+    // SAFETY: Carbon marks this read-only API as not thread safe. The marker
+    // confines every call to the main thread; its return type is Boolean (u8).
+    unsafe { IsSecureEventInputEnabled() != 0 }
+}
+
+fn read_error(result: i32) -> String {
+    if result as u32 == NOT_PERMITTED {
+        "kIOReturnNotPermitted (IOKit 0xe00002e2)".into()
+    } else {
+        format!("IOKit 0x{:08x}", result as u32)
+    }
+}
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
@@ -95,28 +115,26 @@ fn number_property(device: Ref, name: &str) -> Option<i64> {
     property(device, name)?.downcast::<CFNumber>()?.to_i64()
 }
 
-pub fn read_snapshot(filter: &str) -> Snapshot {
-    snapshot_with_options(filter, false)
+pub fn read_snapshot(filter: &str, secure_input_enabled: bool) -> Snapshot {
+    snapshot_with_options(filter, false, secure_input_enabled)
 }
 
-pub fn probe_snapshot(filter: &str) -> Snapshot {
-    snapshot_with_options(filter, true)
+pub fn probe_snapshot(filter: &str, secure_input_enabled: bool) -> Snapshot {
+    snapshot_with_options(filter, true, secure_input_enabled)
 }
 
-fn snapshot_with_options(filter: &str, refresh: bool) -> Snapshot {
+fn snapshot_with_options(filter: &str, refresh: bool, secure_input_enabled: bool) -> Snapshot {
     // SAFETY: Constant 1 is kIOHIDRequestTypeListenEvent. Checking does not ask
     // for access or change the user's privacy settings.
     let access = unsafe { IOHIDCheckAccess(1) };
-    let mut snapshot = Snapshot {
-        input_monitoring: match access {
+    let mut snapshot = Snapshot::new(
+        match access {
             0 => "granted",
             1 => "denied",
             _ => "not_requested",
-        }
-        .into(),
-        devices: vec![],
-        error: None,
-    };
+        },
+        secure_input_enabled,
+    );
 
     // SAFETY: All raw handles below come from IOKit. Their containing CF
     // collections outlive all borrows, and each Create/Copy result is released.
@@ -146,6 +164,7 @@ fn snapshot_with_options(filter: &str, refresh: bool) -> Snapshot {
                 battery_percent: None,
                 source: None,
                 battery_elements: vec![],
+                access_blocked: false,
                 error: None,
             };
             // Opening only the selected keyboard avoids requesting access to
@@ -157,11 +176,20 @@ fn snapshot_with_options(filter: &str, refresh: bool) -> Snapshot {
                 snapshot.devices.push(found);
                 continue;
             }
+            // Secure Input protects the whole keyboard interface, including
+            // battery fields. Wait for it to end instead of retrying HID reads.
+            if snapshot.secure_input_enabled {
+                found.error =
+                    Some("Battery reads are paused while macOS Secure Input is active.".into());
+                snapshot.devices.push(found);
+                continue;
+            }
             let result = IOHIDDeviceOpen(device, 0);
             if result != 0 {
+                found.access_blocked = result as u32 == NOT_PERMITTED;
                 found.error = Some(format!(
-                    "Could not open the keyboard: IOKit 0x{:08x}",
-                    result as u32
+                    "Could not open the keyboard: {}",
+                    read_error(result)
                 ));
                 snapshot.devices.push(found);
                 continue;
@@ -219,7 +247,12 @@ fn snapshot_with_options(filter: &str, refresh: bool) -> Snapshot {
                             ));
                         }
                     } else {
-                        reading.read_error = Some(format!("IOKit 0x{:08x}", result as u32));
+                        found.access_blocked |= result as u32 == NOT_PERMITTED;
+                        reading.read_error = Some(if result == 0 {
+                            "macOS returned no HID value.".into()
+                        } else {
+                            read_error(result)
+                        });
                     }
                     found.battery_elements.push(reading);
                 }

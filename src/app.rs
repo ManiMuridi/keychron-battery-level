@@ -58,11 +58,7 @@ define_class!(
                 button.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(12.0, 0.0)));
             }
             self.ivars().status_item.set(item).expect("status item initialized once");
-            self.render(Snapshot {
-                input_monitoring: "checking".into(),
-                devices: vec![],
-                error: None,
-            });
+            self.render(Snapshot::new("checking", hid::secure_input_enabled(self.mtm())));
             self.refresh();
             // SAFETY: tick: is implemented below with the NSTimer signature.
             let timer = unsafe {
@@ -86,7 +82,9 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             self.poll_read();
-            if self.ivars().next_refresh.get().is_some_and(|next| Instant::now() >= next) {
+            let secure_input_changed = self.ivars().snapshot.borrow().as_ref()
+                .is_some_and(|snapshot| snapshot.secure_input_enabled != hid::secure_input_enabled(self.mtm()));
+            if secure_input_changed || self.ivars().next_refresh.get().is_some_and(|next| Instant::now() >= next) {
                 self.refresh();
             }
         }
@@ -98,10 +96,18 @@ define_class!(
 
         #[unsafe(method(enableBatteryAccess:))]
         fn enable_battery_access(&self, _sender: &NSMenuItem) {
-            if !hid::request_access() {
-                open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent");
-            }
+            hid::request_access();
+            open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent");
             self.refresh();
+        }
+
+        #[unsafe(method(showSecureInputHelp:))]
+        fn show_secure_input_help(&self, _sender: &NSMenuItem) {
+            let alert = NSAlert::new(self.mtm());
+            alert.setMessageText(ns_string!("Battery reads paused by macOS"));
+            alert.setInformativeText(ns_string!("Secure Input protects the keyboard while you enter passwords. It can also block the battery reading, even when Input Monitoring is enabled.\n\nFinish entering your password and close any password dialogs. Battery reads resume automatically when Secure Input ends.\n\nIf this remains after unlocking your Mac, try locking and unlocking again. If it persists, save your work and restart macOS."));
+            alert.addButtonWithTitle(ns_string!("OK"));
+            alert.runModal();
         }
 
         #[unsafe(method(copyDiagnostics:))]
@@ -167,12 +173,13 @@ impl AppDelegate {
         }
         let (sender, receiver) = mpsc::channel();
         self.ivars().next_refresh.set(None);
+        let secure_input_enabled = hid::secure_input_enabled(self.mtm());
         // Device reads can wait on Bluetooth. Exactly one worker is allowed at
         // a time, including when the user repeatedly clicks Refresh.
         let worker = std::thread::Builder::new()
             .name("battery-reader".into())
             .spawn(move || {
-                let snapshot = hid::probe_snapshot("Keychron");
+                let snapshot = hid::probe_snapshot("Keychron", secure_input_enabled);
                 let _ = sender.send(snapshot);
             });
         match worker {
@@ -199,6 +206,12 @@ impl AppDelegate {
             Ok(snapshot) => {
                 pending.take();
                 drop(pending);
+                // A lock or password dialog may change access during the read.
+                // Discard that result and read again with the current state.
+                if snapshot.secure_input_enabled != hid::secure_input_enabled(self.mtm()) {
+                    self.refresh();
+                    return;
+                }
                 self.render(snapshot);
                 self.ivars()
                     .next_refresh
@@ -228,9 +241,8 @@ impl AppDelegate {
 
     fn show_error(&self, error: String) {
         self.render(Snapshot {
-            input_monitoring: "unknown".into(),
-            devices: vec![],
             error: Some(error),
+            ..Snapshot::new("unknown", hid::secure_input_enabled(self.mtm()))
         });
     }
 
@@ -262,11 +274,16 @@ impl AppDelegate {
             menu.addItem(&self.item("Hold Fn+B for the keyboard's battery estimate", None));
         }
         menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
-        if matches!(
-            snapshot.input_monitoring.as_str(),
-            "denied" | "not_requested"
-        ) {
-            menu.addItem(&self.item("Enable Battery Access…", Some(sel!(enableBatteryAccess:))));
+        if snapshot.secure_input_enabled {
+            menu.addItem(&self.item("Secure Input Help…", Some(sel!(showSecureInputHelp:))));
+        }
+        if snapshot.needs_access_settings() {
+            let title = if snapshot.input_monitoring == "granted" {
+                "Review Battery Access…"
+            } else {
+                "Enable Battery Access…"
+            };
+            menu.addItem(&self.item(title, Some(sel!(enableBatteryAccess:))));
         }
         menu.addItem(&self.item("Refresh Battery", Some(sel!(refreshBattery:))));
         menu.addItem(&self.item("Copy Diagnostics", Some(sel!(copyDiagnostics:))));

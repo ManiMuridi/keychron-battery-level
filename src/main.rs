@@ -9,13 +9,17 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         None => app::run(),
         Some("--diagnose") => {
-            let snapshot = std::thread::spawn(|| hid::probe_snapshot("Keychron"))
-                .join()
-                .expect("battery reader stopped unexpectedly");
+            let mtm = objc2::MainThreadMarker::new().expect("diagnostics start on the main thread");
+            let secure_input_enabled = hid::secure_input_enabled(mtm);
+            let snapshot =
+                std::thread::spawn(move || hid::probe_snapshot("Keychron", secure_input_enabled))
+                    .join()
+                    .expect("battery reader stopped unexpectedly");
             println!("{}", serde_json::to_string_pretty(&snapshot).unwrap());
         }
         Some("--cached") => {
-            let snapshot = hid::read_snapshot("Keychron");
+            let mtm = objc2::MainThreadMarker::new().expect("diagnostics start on the main thread");
+            let snapshot = hid::read_snapshot("Keychron", hid::secure_input_enabled(mtm));
             println!("{}", serde_json::to_string_pretty(&snapshot).unwrap());
         }
         Some("--help" | "-h") => println!(

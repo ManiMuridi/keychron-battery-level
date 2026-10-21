@@ -61,9 +61,33 @@ Launching with `cargo run` works for UI development, but use the `.app` when tes
 permissions. After rebuilding an ad-hoc-signed binary, macOS may require you to
 remove/re-add it under Input Monitoring. Keep the app at a consistent path.
 
+## Battery unavailable after unlocking or updating macOS
+
+Input Monitoring can be **granted** while macOS still refuses battery reads with
+`kIOReturnNotPermitted` (`0xe00002e2`). One cause is **Secure Input**, which protects
+the keyboard interface while a password field or the login screen is active.
+It can remain active after unlocking the Mac.
+
+The app detects this state and shows **Battery reads paused by macOS Secure Input**.
+It pauses HID reads and automatically retries when Secure Input ends. Use **Secure
+Input Help…** for recovery steps:
+
+1. Finish entering passwords and close any password dialogs.
+2. If the message remains after unlocking, lock the Mac with **Control–Command–Q**
+   and unlock it again.
+3. If it persists, save your work and restart macOS.
+
+The app checks the state using Apple's `IsSecureEventInputEnabled` API; it never
+disables Secure Input. See Apple's [Secure Event Input technical note](https://developer.apple.com/library/archive/technotes/tn2150/_index.html).
+
+If Secure Input is off but macOS still blocks the read, choose **Review Battery
+Access…** and check Input Monitoring. After replacing an ad-hoc-signed build, remove
+and re-add the copy in Applications, then quit and reopen it. Recompiling alone does
+not clear an active Secure Input session or restore a changed permission identity.
+
 ## What can it read?
 
-This first version looks for connected HID devices whose product name contains
+The app looks for connected HID devices whose product name contains
 `Keychron`, including older keyboards that identify with Apple's vendor ID in Mac
 mode. It reads only these input usages:
 
@@ -101,7 +125,8 @@ from matching keyboards, using standard HID GET_REPORT requests. Handles are ope
 closed after each refresh.
 
 **Copy Diagnostics** copies the current snapshot as JSON. It includes product name,
-transport, vendor/product IDs, permission state, battery field metadata and errors;
+transport, vendor/product IDs, app version, permission and Secure Input states,
+battery field metadata and errors;
 it omits Bluetooth addresses, serial numbers, and keyboard input.
 
 For a one-time terminal diagnostic:
@@ -137,7 +162,8 @@ against `Cargo.toml`, and publishes prebuilt downloads. Update the version in
 Cargo metadata during packaging.
 
 Manual checks: permission denied, grant and restart, keyboard disconnect/reconnect,
-valid/absent battery reading, refresh, copy diagnostics, and quit.
+valid/absent battery reading, Secure Input pause and recovery, refresh, copy
+diagnostics, and quit.
 
 ## Reference
 

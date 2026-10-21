@@ -1,6 +1,6 @@
 [package]
 name = "keychron-battery"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A native macOS menu bar battery monitor for Keychron keyboards"
 license = "MIT"
